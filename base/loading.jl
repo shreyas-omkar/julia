@@ -671,20 +671,36 @@ function env_project_file(env::String)::Union{Bool,String}
 end
 
 function base_project(project_file)
-    base_dir = abspath(joinpath(dirname(project_file), ".."))
-    base_project_file = env_project_file(base_dir)
-    base_project_file isa String || return nothing
-    d = parsed_toml(base_project_file)
-    workspace = get(d, "workspace", nothing)::Union{Dict{String, Any}, Nothing}
-    if workspace === nothing
-        return nothing
+    home_dir = abspath(homedir())
+    project_dir = abspath(dirname(project_file))
+    current_dir = project_dir
+
+    while true
+        parent_dir = abspath(joinpath(current_dir, ".."))
+        # Stop if we've reached root
+        parent_dir == current_dir && return nothing
+        # Stop if we've gone above the home directory
+        startswith(current_dir, home_dir) || return nothing
+
+        base_project_file = env_project_file(parent_dir)
+        if base_project_file isa String
+            d = parsed_toml(base_project_file)
+            workspace = get(d, "workspace", nothing)::Union{Dict{String, Any}, Nothing}
+            if workspace !== nothing
+                projects = get(workspace, "projects", nothing)::Union{Vector{String}, Nothing, String}
+                if projects isa Vector
+                    # Compute relative path from workspace root to the original project
+                    workspace_root = dirname(base_project_file)
+                    relpath_to_project = relpath(project_dir, workspace_root)
+                    # Check if the relative path matches any project in the list
+                    if relpath_to_project in projects
+                        return base_project_file
+                    end
+                end
+            end
+        end
+        current_dir = parent_dir
     end
-    projects = get(workspace, "projects", nothing)::Union{Vector{String}, Nothing, String}
-    projects === nothing && return nothing
-    if projects isa Vector && basename(dirname(project_file)) in projects
-        return base_project_file
-    end
-    return nothing
 end
 
 function project_deps_get(env::String, name::String)::Union{Nothing,PkgId}
