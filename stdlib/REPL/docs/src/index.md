@@ -317,6 +317,26 @@ atreplinit(customize_keys)
 
 Users should refer to `LineEdit.jl` to discover the available actions on key input.
 
+### Automatic bracket insertion
+
+The Julia REPL supports automatically inserting closing brackets, parentheses, braces, and quotes
+when you type the opening character. This feature is disabled by default but can be enabled
+by setting the `auto_insert_closing_bracket` option to `true`.
+
+When enabled, typing an opening bracket `(`, `{`, or `[` will automatically insert the matching
+closing bracket `)`, `}`, or `]` and position the cursor between them. The same behavior applies
+to quotes (`"`, `'`, and `` ` ``). If you then type the closing character, the REPL will skip over
+the auto-inserted character instead of inserting a duplicate. Additionally, pressing backspace
+immediately after auto-insertion will remove both the opening and closing characters.
+
+To enable this feature, add the following to your `~/.julia/config/startup.jl` file:
+
+```julia
+atreplinit() do repl
+    repl.options.auto_insert_closing_bracket = true
+end
+```
+
 ## Tab completion
 
 In the Julian, pkg and help modes of the REPL, one can enter the first few characters of a function

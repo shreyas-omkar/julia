@@ -940,3 +940,158 @@ end
     strings3 = ["abcdef", "123456\nijklmn"]
     @test getcompletion(strings3) == "\033[0B\nabcdef\n123456\nijklmn\n"
 end
+
+# Test bracket insertion functionality
+@testset "Bracket insertion" begin
+    # Test bracket insertion with fake REPL
+    # Note: In practice, bracket_insert_keymap is added via auto_insert_closing_bracket option,
+    # but here we test the keymap functions directly
+    term = FakeTerminal(IOBuffer(), IOBuffer(), IOBuffer())
+    prompt = LineEdit.Prompt("test> ")
+    prompt.keymap_dict = LineEdit.bracket_insert_keymap
+    interface = LineEdit.ModalInterface([prompt])
+    s = LineEdit.init_state(term, interface)
+
+    # Test left bracket at EOF triggers auto-complete
+    LineEdit.bracket_insert_keymap['('](s)
+    @test content(s) == "()"
+    @test position(buffer(s)) == 1
+
+    # Test right bracket skips over matching bracket
+    LineEdit.bracket_insert_keymap[')'](s)
+    @test content(s) == "()"
+    @test position(buffer(s)) == 2
+
+    # Test backspace removes both brackets
+    s = LineEdit.init_state(term, interface)
+    LineEdit.bracket_insert_keymap['('](s)
+    LineEdit.bracket_insert_keymap['\b'](s)
+    @test content(s) == ""
+    @test position(buffer(s)) == 0
+
+    # Test quote insertion at EOF
+    s = LineEdit.init_state(term, interface)
+    LineEdit.bracket_insert_keymap['"'](s)
+    @test content(s) == "\"\""
+    @test position(buffer(s)) == 1
+
+    # Test quote skip over
+    LineEdit.bracket_insert_keymap['"'](s)
+    @test content(s) == "\"\""
+    @test position(buffer(s)) == 2
+
+    # Test transpose detection - single quote after letter shouldn't auto-complete
+    s = LineEdit.init_state(term, interface)
+    edit_insert(buffer(s), 'A')
+    LineEdit.bracket_insert_keymap['\'']( s)
+    @test content(s) == "A'"
+    @test position(buffer(s)) == 2
+
+    # Test single quote after space should auto-complete
+    s = LineEdit.init_state(term, interface)
+    edit_insert(buffer(s), ' ')
+    LineEdit.bracket_insert_keymap['\''](s)
+    @test content(s) == " ''"
+    @test position(buffer(s)) == 2
+
+    # Test bracket not inserted when next char is not whitespace
+    s = LineEdit.init_state(term, interface)
+    edit_insert(buffer(s), "x")
+    charseek(buffer(s), 0)
+    LineEdit.bracket_insert_keymap['('](s)
+    @test content(s) == "(x"
+    @test position(buffer(s)) == 1
+
+    # Test all bracket types
+    for (left, right) in (('[', ']'), ('{', '}'))
+        s = LineEdit.init_state(term, interface)
+        LineEdit.bracket_insert_keymap[left](s)
+        @test content(s) == string(left, right)
+        @test position(buffer(s)) == 1
+        LineEdit.bracket_insert_keymap[right](s)
+        @test position(buffer(s)) == 2
+        LineEdit.bracket_insert_keymap['\b'](s)
+        @test content(s) == string(left, right)
+        @test position(buffer(s)) == 1
+        LineEdit.bracket_insert_keymap['\b'](s)
+        @test content(s) == ""
+        @test position(buffer(s)) == 0
+    end
+
+    # Test all quote types
+    for quote_char in ('`', '"', '\'')
+        s = LineEdit.init_state(term, interface)
+        LineEdit.bracket_insert_keymap[quote_char](s)
+        @test content(s) == string(quote_char, quote_char)
+        @test position(buffer(s)) == 1
+    end
+
+    # Test nested brackets
+    s = LineEdit.init_state(term, interface)
+    LineEdit.bracket_insert_keymap['('](s)
+    LineEdit.bracket_insert_keymap['['](s)
+    @test content(s) == "([])"
+    @test position(buffer(s)) == 2
+    LineEdit.bracket_insert_keymap[']'](s)
+    @test position(buffer(s)) == 3
+    LineEdit.bracket_insert_keymap[')'](s)
+    @test position(buffer(s)) == 4
+
+    # Test backspace in middle of nested brackets
+    s = LineEdit.init_state(term, interface)
+    LineEdit.bracket_insert_keymap['('](s)
+    LineEdit.bracket_insert_keymap['{'](s)
+    @test content(s) == "({})"
+    @test position(buffer(s)) == 2
+    LineEdit.bracket_insert_keymap['\b'](s)
+    @test content(s) == "()"
+    @test position(buffer(s)) == 1
+
+    # Test triple quotes don't auto-complete
+    s = LineEdit.init_state(term, interface)
+    LineEdit.bracket_insert_keymap['"'](s)
+    @test content(s) == "\"\""
+    @test position(buffer(s)) == 1
+    LineEdit.bracket_insert_keymap['"'](s)
+    @test content(s) == "\"\""
+    @test position(buffer(s)) == 2
+    LineEdit.bracket_insert_keymap['"'](s)
+    @test content(s) == "\"\"\""
+    @test position(buffer(s)) == 3
+
+    # Test transpose detection for various cases
+    s = LineEdit.init_state(term, interface)
+    edit_insert(buffer(s), "x123")
+    LineEdit.bracket_insert_keymap['\''](s)
+    @test content(s) == "x123'"
+    @test position(buffer(s)) == 5
+
+    s = LineEdit.init_state(term, interface)
+    edit_insert(buffer(s), "arr]")
+    LineEdit.bracket_insert_keymap['\''](s)
+    @test content(s) == "arr]'"
+    @test position(buffer(s)) == 5
+
+    # Test right bracket insert when not matching
+    s = LineEdit.init_state(term, interface)
+    LineEdit.bracket_insert_keymap[')'](s)
+    @test content(s) == ")"
+    @test position(buffer(s)) == 1
+
+    # Test backspace doesn't remove mismatched brackets
+    s = LineEdit.init_state(term, interface)
+    LineEdit.bracket_insert_keymap['('](s)
+    edit_insert(buffer(s), ']')
+    charseek(buffer(s), 1)
+    LineEdit.bracket_insert_keymap['\b'](s)
+    @test content(s) == "]"
+    @test position(buffer(s)) == 0
+
+    # Test bracket insertion followed by whitespace
+    s = LineEdit.init_state(term, interface)
+    edit_insert(buffer(s), " ")
+    charseek(buffer(s), 0)
+    LineEdit.bracket_insert_keymap['('](s)
+    @test content(s) == "() "
+    @test position(buffer(s)) == 1
+end
