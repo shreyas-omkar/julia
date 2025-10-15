@@ -14,6 +14,7 @@
 // define `jl_unw_get` as a macro, since (like setjmp)
 // returning from the callee function will invalidate the context
 #ifdef _OS_WINDOWS_
+#include <winternl.h>
 uv_mutex_t jl_in_stackwalk;
 #define jl_unw_get(context) (RtlCaptureContext(context), 0)
 #elif !defined(JL_DISABLE_LIBUNWIND)
@@ -457,16 +458,97 @@ static DWORD64 WINAPI JuliaGetModuleBase64(
 }
 
 // Might be called from unmanaged thread.
-volatile int needsSymRefreshModuleList;
-BOOL (WINAPI *hSymRefreshModuleList)(HANDLE);
+static PVOID dll_notification_cookie;
+static small_arraylist_t dll_info_list;
+
+// Structure definitions for LdrDllNotification
+typedef struct _LDR_DLL_LOADED_NOTIFICATION_DATA {
+    ULONG Flags;
+    PCUNICODE_STRING FullDllName;
+    PCUNICODE_STRING BaseDllName;
+    PVOID DllBase;
+    ULONG SizeOfImage;
+} LDR_DLL_LOADED_NOTIFICATION_DATA;
+typedef const LDR_DLL_LOADED_NOTIFICATION_DATA *PCLDR_DLL_LOADED_NOTIFICATION_DATA;
+
+typedef struct _LDR_DLL_UNLOADED_NOTIFICATION_DATA {
+    ULONG Flags;
+    PCUNICODE_STRING FullDllName;
+    PCUNICODE_STRING BaseDllName;
+    PVOID DllBase;
+    ULONG SizeOfImage;
+} LDR_DLL_UNLOADED_NOTIFICATION_DATA;
+typedef const LDR_DLL_UNLOADED_NOTIFICATION_DATA *PCLDR_DLL_UNLOADED_NOTIFICATION_DATA;
+
+typedef union _LDR_DLL_NOTIFICATION_DATA {
+    LDR_DLL_LOADED_NOTIFICATION_DATA Loaded;
+    LDR_DLL_UNLOADED_NOTIFICATION_DATA Unloaded;
+} LDR_DLL_NOTIFICATION_DATA;
+typedef const LDR_DLL_NOTIFICATION_DATA *PCLDR_DLL_NOTIFICATION_DATA;
+
+#define LDR_DLL_NOTIFICATION_REASON_LOADED   1
+#define LDR_DLL_NOTIFICATION_REASON_UNLOADED 2
+
+// Forward declarations for ntdll functions
+typedef VOID CALLBACK (*PLDR_DLL_NOTIFICATION_FUNCTION)(
+  ULONG                       NotificationReason,
+  PCLDR_DLL_NOTIFICATION_DATA NotificationData,
+  PVOID                       Context
+);
+NTSTATUS NTAPI LdrRegisterDllNotification(ULONG Flags, PLDR_DLL_NOTIFICATION_FUNCTION NotificationFunction, PVOID Context, PVOID *Cookie);
+NTSTATUS NTAPI LdrUnregisterDllNotification(PVOID Cookie);
+
+// Callback for LdrRegisterDllNotification
+static VOID CALLBACK dll_notification_callback(
+    ULONG NotificationReason,
+    PCLDR_DLL_NOTIFICATION_DATA NotificationData,
+    PVOID Context)
+{
+    (void)Context;
+
+    uv_mutex_lock(&jl_in_stackwalk);
+    // Store DLL information and update symbol handler based on notification reason
+    if (NotificationReason == LDR_DLL_NOTIFICATION_REASON_LOADED) {
+        const LDR_DLL_LOADED_NOTIFICATION_DATA *data = &NotificationData->Loaded;
+        small_arraylist_push(&dll_info_list, data->DllBase);
+        small_arraylist_push(&dll_info_list, (PVOID)(uintptr_t)data->SizeOfImage);
+        SymLoadModuleExW(GetCurrentProcess(), NULL,
+                        data->FullDllName->Buffer,
+                        data->BaseDllName->Buffer,
+                        (DWORD64)data->DllBase,
+                        data->SizeOfImage,
+                        NULL,
+                        0);
+    }
+    else if (NotificationReason == LDR_DLL_NOTIFICATION_REASON_UNLOADED) {
+        const LDR_DLL_UNLOADED_NOTIFICATION_DATA *data = &NotificationData->Unloaded;
+        small_arraylist_push(&dll_info_list, data->DllBase);
+        small_arraylist_push(&dll_info_list, 0);
+        SymUnloadModule64(GetCurrentProcess(), (DWORD64)data->DllBase);
+    }
+    uv_mutex_unlock(&jl_in_stackwalk);
+}
+
+// Initialize DLL info list
+void jl_init_dll_info_list(void)
+{
+    small_arraylist_new(&dll_info_list, 0);
+    LdrRegisterDllNotification(0, dll_notification_callback, NULL, &dll_notification_cookie);
+}
+
+void jl_fin_dll_info_list(void)
+{
+    if (dll_notification_cookie) {
+        LdrUnregisterDllNotification(dll_notification_cookie);
+        dll_notification_cookie = NULL;
+    }
+}
+
 
 JL_DLLEXPORT void jl_refresh_dbg_module_list(void)
 {
-    if (needsSymRefreshModuleList && hSymRefreshModuleList != NULL) {
-        hSymRefreshModuleList(GetCurrentProcess());
-        needsSymRefreshModuleList = 0;
-    }
 }
+
 static int jl_unw_init(bt_cursor_t *cursor, bt_context_t *Context)
 {
     int result;
